@@ -6,6 +6,7 @@ import json
 import os
 import time
 from collections import defaultdict
+import math
 
 from scapy.all import IP, TCP
 from packet_capture_engine import PacketCapture
@@ -17,6 +18,9 @@ app = Flask(__name__)
 CORS(app)
 
 
+CAPTURE_SECONDS = 15
+
+
 class CaptureManager:
     def __init__(self):
         self.traffic_analyzer = TrafficAnalyzer()
@@ -24,10 +28,15 @@ class CaptureManager:
         self.alert_system = AlertSystem()
 
         self._packet_capture = None
-        self._capture_thread = None
         self._processing_thread = None
+        self._rate_thread = None
+        self._timer_thread = None
+        self._test_thread = None
         self.running = False
+        self.testing = False
+        self.time_remaining = 0
 
+        self._packet_count = 0
         self._stats = {
             'total': 0,
             'normal': 0,
@@ -37,6 +46,12 @@ class CaptureManager:
         self._traffic_history = []  # [{t: ISO, pps: float}]
         self._lock = threading.Lock()
 
+    # ── Public API ────────────────────────────────────────
+
+    @property
+    def is_active(self):
+        return self.running or self.testing
+
     # ── Live capture ─────────────────────────────────────
 
     def start_capture(self, interface="eth0"):
@@ -45,7 +60,9 @@ class CaptureManager:
 
         self._reset_stats()
         self._packet_capture = PacketCapture()
+        self._packet_count = 0
         self.running = True
+        self.time_remaining = CAPTURE_SECONDS
 
         self._packet_capture.start_capture(interface)
         self._processing_thread = threading.Thread(
@@ -53,19 +70,38 @@ class CaptureManager:
         )
         self._processing_thread.start()
 
-        self._capture_thread = threading.Thread(
+        self._rate_thread = threading.Thread(
             target=self._rate_tracker, daemon=True
         )
-        self._capture_thread.start()
+        self._rate_thread.start()
+
+        self._timer_thread = threading.Thread(
+            target=self._auto_stop_timer, daemon=True
+        )
+        self._timer_thread.start()
         return True
 
     def stop_capture(self):
-        if not self.running:
-            return False
-        self.running = False
-        if self._packet_capture:
-            self._packet_capture.stop()
-        return True
+        stopped = False
+        if self.running:
+            self.running = False
+            self.time_remaining = 0
+            if self._packet_capture:
+                self._packet_capture.stop()
+            stopped = True
+        if self.testing:
+            self.testing = False
+            stopped = True
+        return stopped
+
+    def _auto_stop_timer(self):
+        for s in range(CAPTURE_SECONDS, 0, -1):
+            if not self.running:
+                return
+            self.time_remaining = s
+            time.sleep(1)
+        if self.running:
+            self.stop_capture()
 
     def _processing_loop(self):
         while self.running:
@@ -73,6 +109,8 @@ class CaptureManager:
                 packet = self._packet_capture.packet_queue.get(timeout=0.5)
             except queue.Empty:
                 continue
+
+            self._packet_count += 1
 
             features = self.traffic_analyzer.analyze_packet(packet)
             if not features:
@@ -105,86 +143,99 @@ class CaptureManager:
 
     def _rate_tracker(self):
         last_time = time.time()
-        count = 0
+        last_count = 0
         while self.running:
             time.sleep(1)
             now = time.time()
             elapsed = now - last_time
-            pps = count / elapsed if elapsed > 0 else 0
+            pps = (self._packet_count - last_count) / elapsed if elapsed > 0 else 0
             with self._lock:
                 self._traffic_history.append({
                     't': time.strftime('%Y-%m-%dT%H:%M:%S', time.gmtime(now)),
                     'pps': round(pps, 1),
                 })
-                if len(self._traffic_history) > 60:
+                if len(self._traffic_history) > CAPTURE_SECONDS:
                     self._traffic_history.pop(0)
-            count = 0
+            last_count = self._packet_count
             last_time = now
 
-        # Drain remaining count on stop
-        if count > 0:
-            with self._lock:
-                self._traffic_history.append({
-                    't': time.strftime('%Y-%m-%dT%H:%M:%S', time.gmtime(time.time())),
-                    'pps': 0,
-                })
-
-    # ── Test mode (offline, synchronous) ─────────────────
+    # ── Test mode (async) ────────────────────────────────
 
     def run_test(self):
+        if self.is_active:
+            return
         self._reset_stats()
+        self.testing = True
 
         def _p(src, dst, sport, dport, flags, count):
             return [IP(src=src, dst=dst) / TCP(sport=sport, dport=dport, flags=flags)
                     for _ in range(count)]
 
-        packets = (
-            _p("192.168.1.1", "192.168.1.2", 1234, 80,  "A", 1) +
-            _p("192.168.1.1", "192.168.1.2", 1234, 80,  "P", 2) +
-            _p("192.168.1.3", "192.168.1.4", 1235, 443, "A", 1) +
-            _p("192.168.1.3", "192.168.1.4", 1235, 443, "P", 1) +
-            _p("10.0.0.1",   "192.168.1.2", 5678, 80,  "S", 12) +
-            _p("192.168.1.100", "192.168.1.2", 4321, 22, "S", 12)
-        )
+        # Group packets into batches so they arrive progressively
+        batches = [
+            _p("192.168.1.1", "192.168.1.2", 1234, 80,  "A", 1),
+            _p("192.168.1.1", "192.168.1.2", 1234, 80,  "P", 2),
+            _p("192.168.1.3", "192.168.1.4", 1235, 443, "A", 1),
+            _p("192.168.1.3", "192.168.1.4", 1235, 443, "P", 1),
+            _p("10.0.0.1",   "192.168.1.2", 5678, 80,  "S", 4),
+            _p("10.0.0.1",   "192.168.1.2", 5678, 80,  "S", 4),
+            _p("10.0.0.1",   "192.168.1.2", 5678, 80,  "S", 4),
+            _p("192.168.1.100", "192.168.1.2", 4321, 22, "S", 4),
+            _p("192.168.1.100", "192.168.1.2", 4321, 22, "S", 4),
+            _p("192.168.1.100", "192.168.1.2", 4321, 22, "S", 4),
+        ]
 
-        # Use a fresh analyzer + detector for test isolation
-        analyzer = TrafficAnalyzer()
-        detector = DetectionEngine()
-
-        for packet in packets:
-            features = analyzer.analyze_packet(packet)
-            if not features:
-                continue
-            with self._lock:
-                self._stats['total'] += 1
-            threats = detector.detect_threats(features)
-            if threats:
-                for t in threats:
-                    if t['type'] == 'signature':
+        def _process_batches():
+            analyzer = TrafficAnalyzer()
+            detector = DetectionEngine()
+            for i, batch in enumerate(batches):
+                if not self.testing:
+                    return  # cancelled
+                for packet in batch:
+                    if not self.testing:
+                        return
+                    features = analyzer.analyze_packet(packet)
+                    if not features:
+                        continue
+                    with self._lock:
+                        self._stats['total'] += 1
+                    threats = detector.detect_threats(features)
+                    if threats:
+                        for t in threats:
+                            if t['type'] == 'signature':
+                                with self._lock:
+                                    self._stats['attacks'] += 1
+                            elif t['type'] == 'anomaly':
+                                with self._lock:
+                                    self._stats['anomalies'] += 1
+                        packet_info = {
+                            'source_ip': packet[IP].src,
+                            'destination_ip': packet[IP].dst,
+                            'source_port': packet[TCP].sport,
+                            'destination_port': packet[TCP].dport,
+                        }
+                        for t in threats:
+                            self.alert_system.generate_alert(t, packet_info)
+                    else:
                         with self._lock:
-                            self._stats['attacks'] += 1
-                    elif t['type'] == 'anomaly':
-                        with self._lock:
-                            self._stats['anomalies'] += 1
-                packet_info = {
-                    'source_ip': packet[IP].src,
-                    'destination_ip': packet[IP].dst,
-                    'source_port': packet[TCP].sport,
-                    'destination_port': packet[TCP].dport,
-                }
-                for t in threats:
-                    self.alert_system.generate_alert(t, packet_info)
-            else:
+                            self._stats['normal'] += 1
+                # Record traffic point
+                now = time.time()
                 with self._lock:
-                    self._stats['normal'] += 1
+                    # Count packets in this batch
+                    pps = round(len(batch), 1)
+                    self._traffic_history.append({
+                        't': time.strftime('%Y-%m-%dT%H:%M:%S', time.gmtime(now)),
+                        'pps': pps,
+                    })
+                    if len(self._traffic_history) > 60:
+                        self._traffic_history.pop(0)
+                if i < len(batches) - 1:
+                    time.sleep(0.8)
+            self.testing = False
 
-        # Synthesize traffic history for test mode
-        with self._lock:
-            self._traffic_history = [
-                {'t': time.strftime('%Y-%m-%dT%H:%M:%S', time.gmtime(time.time() - (29 - i))),
-                 'pps': round(5 + (15 if 10 <= i < 20 else 0) + (80 if 10 <= i < 20 else 0) + (2 if i >= 20 else 0) * (i % 3), 1)}
-                for i in range(30)
-            ]
+        self._test_thread = threading.Thread(target=_process_batches, daemon=True)
+        self._test_thread.start()
 
     # ── Internal ─────────────────────────────────────────
 
@@ -241,6 +292,9 @@ def index():
 def api_status():
     return jsonify({
         'running': capture_manager.running,
+        'testing': capture_manager.testing,
+        'is_active': capture_manager.is_active,
+        'time_remaining': capture_manager.time_remaining,
         'mode': 'live',
     })
 
@@ -260,6 +314,7 @@ def api_stop():
 
 @app.route('/api/test', methods=['POST'])
 def api_test():
+    capture_manager.clear()
     capture_manager.run_test()
     return jsonify({'success': True})
 
