@@ -1,3 +1,10 @@
+from scapy.all import IP, TCP
+import queue
+from packet_capture_engine import PacketCapture
+from traffic_analysis_module import TrafficAnalyzer
+from detection_engine import DetectionEngine
+from alert_system import AlertSystem
+
 class IntrusionDetectionSystem:
     def __init__(self, interface="eth0"):
         self.packet_capture = PacketCapture()
