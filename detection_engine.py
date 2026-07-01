@@ -9,6 +9,7 @@ class DetectionEngine:
         )
         self.signature_rules = self.load_signature_rules()
         self.training_data = []
+        self._train_default()
 
     def load_signature_rules(self):
         return {
@@ -28,6 +29,10 @@ class DetectionEngine:
 
     def train_anomaly_detector(self, normal_traffic_data):
         self.anomaly_detector.fit(normal_traffic_data)
+
+    def _train_default(self):
+        normal_data = np.random.rand(200, 3) * [1500, 50, 75000]
+        self.anomaly_detector.fit(normal_data)
 
     def detect_threats(self, features):
         threats = []
