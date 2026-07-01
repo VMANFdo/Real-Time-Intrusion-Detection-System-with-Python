@@ -12,13 +12,15 @@ A lightweight, real-time intrusion detection system built with Python, **Scapy**
 | `alert_system.py` | Logs structured JSON alerts to file and escalates high-confidence threats |
 | `ids.py` | Orchestrates the pipeline: capture → analyze → detect → alert |
 | `data.py` | Offline test harness with synthetic attack scenarios |
+| `dashboard.py` | Flask web server + REST API for the dashboard |
+| `templates/dashboard.html` | Single-page dashboard UI (also standalone for Vercel) |
 
 ## Quick Start
 
 ### 1. Install Dependencies
 
 ```bash
-pip install scapy numpy scikit-learn
+pip install -r requirements.txt
 ```
 
 > **Note:** Scapy requires [Npcap](https://npcap.com/) on Windows for live packet capture. Npcap's "WinPcap API-compatible Mode" must be enabled during installation.
@@ -40,8 +42,6 @@ python data.py
 ...
 [ 7] IP / TCP 10.0.0.1:rrac > 192.168.1.2:http S  >>> ['syn_flood', 'port_scan', 'anomaly']
 ...
-[19] IP / TCP 192.168.1.100:4321 > 192.168.1.2:ssh S  >>> ['syn_flood', 'port_scan', 'anomaly']
-...
 ==================================================
   SUMMARY
 ==================================================
@@ -56,7 +56,30 @@ python data.py
 - **Subsequent normal packets** (ACK/PSH, low rate) pass without alerts.
 - **SYN flood & port scan packets** trigger both signature rules and anomaly alerts once the per-flow packet rate crosses the threshold.
 
-### 3. Run Against Live Traffic (Safely)
+### 3. Run the Web Dashboard
+
+```bash
+python dashboard.py
+```
+
+Open **http://localhost:5000** in your browser.
+
+The dashboard works in two modes:
+
+- **Live mode** — automatically enabled when the Flask backend is running. Click "Start Capture" to begin analyzing live traffic, or "Run Test" to replay the synthetic attack data.
+- **Demo mode** — auto-falls back when no backend is detected. Uses embedded test data so you can see the UI in action. The `dashboard.html` file is fully self-contained for static deployment.
+
+![Dashboard Preview](https://img.shields.io/badge/status-working-brightgreen)
+
+**Dashboard features:**
+- Start/Stop live packet capture (requires Npcap + admin)
+- Run synthetic attack test offline
+- 4 stat cards: Total, Normal, Attacks, Anomalies
+- Real-time packet rate chart (Chart.js)
+- Live scrolling alert feed
+- Clear alerts & reset stats
+
+### 4. Run Against Live Traffic (Safely)
 
 The IDS is **read-only** — it captures packets with Scapy's `sniff()` in **promiscuous mode** but never transmits anything.
 
@@ -68,7 +91,14 @@ python -c "from scapy.all import get_windows_if_list; print(*[i['name'] for i in
 
 Common names: `eth0` (Linux), `en0` (macOS), `Wi-Fi` or `Ethernet` (Windows).
 
-#### Start the IDS
+#### Using the Dashboard
+
+1. Select your interface from the dropdown
+2. Click **Start Capture**
+3. Watch alerts appear in real time
+4. Click **Stop** when done
+
+#### Using the CLI
 
 Edit the default interface in `ids.py:9` (the `interface="eth0"` parameter), then:
 
@@ -76,21 +106,37 @@ Edit the default interface in `ids.py:9` (the `interface="eth0"` parameter), the
 python ids.py
 ```
 
-#### Stop Safely
-
-Press **Ctrl+C** — the system shuts down cleanly and the capture thread joins gracefully.
+Press **Ctrl+C** to stop.
 
 > **Safety Note:** The system acts as a passive network tap — it only **reads** packets and never injects traffic, modifies packets, or sends responses. Run it on your local machine or a test VM to observe real traffic without risk.
 
-### Logs
+## Deploy Dashboard to Vercel (Demo Mode)
 
-Alerts are written to `ids_alerts.log` in JSON format:
+The `dashboard.html` file at the project root is a fully standalone static page with embedded demo data. Anyone can view it without a backend.
 
-```json
-{"timestamp": "...", "threat_type": "signature", "rule": "syn_flood", "confidence": 1.0, ...}
-```
+1. Go to [vercel.com](https://vercel.com) and sign in
+2. Click **Add New → Project**
+3. Import this repository or drag & drop `dashboard.html`
+4. Vercel auto-detects it as a static site
+5. Click **Deploy**
 
-High-confidence alerts (confidence > 0.8) are additionally logged at `CRITICAL` level.
+Visitors see the demo mode dashboard with pre-recorded test data. To enable live capture, they'd run `python dashboard.py` locally.
+
+## API Endpoints
+
+When the Flask backend is running (`python dashboard.py`):
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/` | GET | Dashboard UI |
+| `/api/status` | GET | IDS running state |
+| `/api/start` | POST | Start capture (body: `{"interface":"Wi-Fi"}`) |
+| `/api/stop` | POST | Stop capture |
+| `/api/test` | POST | Run synthetic attack test |
+| `/api/stats` | GET | Packet statistics |
+| `/api/traffic` | GET | Packet rate time series |
+| `/api/alerts` | GET | Alert log (query: `?limit=100`) |
+| `/api/clear` | POST | Clear all alerts and stats |
 
 ## Adding Custom Rules
 

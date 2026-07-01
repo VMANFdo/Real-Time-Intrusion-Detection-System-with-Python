@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>IDS Dashboard</title>
+<script src="https://cdn.tailwindcss.com">
+</script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4">
+</script>
+<style>
+  body { font-family: 'Inter', system-ui, -apple-system, sans-serif; }
+  .card { @apply bg-gray-800/80 border border-gray-700 rounded-xl p-5; }
+  .stat-value { @apply text-3xl font-bold tabular-nums; }
+  .btn { @apply px-4 py-2 rounded-lg font-medium text-sm transition-all duration-150 disabled:opacity-40 disabled:cursor-not-allowed; }
+  .btn-primary { @apply bg-emerald-600 hover:bg-emerald-500 text-white; }
+  .btn-danger { @apply bg-red-600 hover:bg-red-500 text-white; }
+  .btn-amber { @apply bg-amber-600 hover:bg-amber-500 text-white; }
+  .btn-gray { @apply bg-gray-600 hover:bg-gray-500 text-white; }
+  .alert-row { @apply border-b border-gray-700/50 text-sm; }
+  .alert-row:hover { @apply bg-gray-700/30; }
+  #alert-table-body { max-height: 360px; overflow-y: auto; }
+  #alert-table-body::-webkit-scrollbar { width: 6px; }
+  #alert-table-body::-webkit-scrollbar-track { background: transparent; }
+  #alert-table-body::-webkit-scrollbar-thumb { @apply bg-gray-600 rounded-full; }
+  select { @apply bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-sm; }
+  .pulse { animation: pulse 2s infinite; }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+  .badge { @apply px-2 py-0.5 rounded-full text-xs font-medium; }
+  .badge-red { @apply bg-red-500/20 text-red-400; }
+  .badge-yellow { @apply bg-amber-500/20 text-amber-400; }
+  .badge-green { @apply bg-emerald-500/20 text-emerald-400; }
+  .badge-blue { @apply bg-blue-500/20 text-blue-400; }
+</style>
+</head>
+<body class="bg-gray-950 text-gray-100 min-h-screen">
+
+<div class="max-w-7xl mx-auto px-4 py-6">
+  <!-- Header -->
+  <div class="flex flex-wrap items-center justify-between gap-4 mb-6">
+    <div class="flex items-center gap-3">
+      <span class="text-2xl">🛡️</span>
+      <h1 class="text-2xl font-bold">IDS Dashboard</h1>
+      <span id="mode-badge" class="badge badge-blue text-xs">Demo</span>
+    </div>
+    <div class="flex items-center gap-4">
+      <div class="flex items-center gap-2 text-sm">
+        <span class="text-gray-400">Status:</span>
+        <span id="status-dot" class="w-2.5 h-2.5 rounded-full bg-gray-500 inline-block"></span>
+        <span id="status-text" class="font-medium">Offline</span>
+      </div>
+      <div class="flex items-center gap-2">
+        <label class="text-gray-400 text-sm">Interface:</label>
+        <select id="interface-select">
+          <option value="Wi-Fi">Wi-Fi</option>
+          <option value="Ethernet">Ethernet</option>
+          <option value="eth0">eth0</option>
+          <option value="en0">en0</option>
+          <option value="Loopback Pseudo-Interface 1">Loopback</option>
+        </select>
+      </div>
+    </div>
+  </div>
+
+  <!-- Controls -->
+  <div class="flex flex-wrap gap-3 mb-6">
+    <button id="btn-start" class="btn btn-primary" onclick="startCapture()">▶ Start Capture</button>
+    <button id="btn-stop" class="btn btn-danger" onclick="stopCapture()" disabled>■ Stop</button>
+    <button id="btn-test" class="btn btn-amber" onclick="runTest()">🧪 Run Test</button>
+    <button id="btn-clear" class="btn btn-gray" onclick="clearAlerts()">🗑 Clear</button>
+  </div>
+
+  <!-- Demo banner -->
+  <div id="demo-banner" class="bg-amber-500/10 border border-amber-500/30 rounded-xl px-5 py-3 mb-6 text-amber-400 text-sm flex items-center gap-3">
+    <span>ⓘ</span>
+    <span><strong>Demo Mode</strong> — showing pre-recorded test data. Start the Flask backend (<code class="bg-gray-800 px-1.5 py-0.5 rounded text-xs">python dashboard.py</code>) for live capture.</span>
+  </div>
+
+  <!-- Stats -->
+  <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+    <div class="card">
+      <div class="text-gray-400 text-sm mb-1">Total Packets</div>
+      <div id="stat-total" class="stat-value text-blue-400">0</div>
+    </div>
+    <div class="card">
+      <div class="text-gray-400 text-sm mb-1">Normal</div>
+      <div id="stat-normal" class="stat-value text-emerald-400">0</div>
+    </div>
+    <div class="card">
+      <div class="text-gray-400 text-sm mb-1">Attacks</div>
+      <div id="stat-attacks" class="stat-value text-red-400">0</div>
+    </div>
+    <div class="card">
+      <div class="text-gray-400 text-sm mb-1">Anomalies</div>
+      <div id="stat-anomalies" class="stat-value text-amber-400">0</div>
+    </div>
+  </div>
+
+  <!-- Chart + Alerts -->
+  <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+    <!-- Chart -->
+    <div class="card">
+      <div class="flex items-center justify-between mb-3">
+        <h2 class="font-semibold">Packet Rate</h2>
+        <span class="text-xs text-gray-500">packets / sec</span>
+      </div>
+      <canvas id="rate-chart" height="200"></canvas>
+    </div>
+
+    <!-- Alert Feed -->
+    <div class="card">
+      <div class="flex items-center justify-between mb-3">
+        <h2 class="font-semibold">Alert Feed</h2>
+        <span id="alert-count" class="text-xs text-gray-400">0 alerts</span>
+      </div>
+      <table class="w-full text-left">
+        <thead class="text-xs text-gray-400 uppercase border-b border-gray-700">
+          <tr>
+            <th class="pb-2 pr-2">Time</th>
+            <th class="pb-2 pr-2">Type</th>
+            <th class="pb-2 pr-2">Source → Dest</th>
+            <th class="pb-2 text-right">Conf</th>
+          </tr>
+        </thead>
+        <tbody id="alert-table-body">
+          <tr>
+            <td colspan="4" class="py-8 text-center text-gray-500 text-sm">No alerts yet</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Footer -->
+  <div class="text-center text-xs text-gray-600 mt-8">
+    IDS Dashboard — built with Flask + Chart.js + Tailwind CSS
+  </div>
+</div>
+
+<script>
+// ── Configuration ────────────────────────────────────────
+const BACKEND_URL = window.location.port === '5000' || window.location.port === '5001'
+  ? '' : 'http://localhost:5000';
+
+// ── Demo Data (used when backend is unreachable) ─────────
+const DEMO_DATA = {
+  stats: { total: 29, normal: 4, attacks: 25, anomalies: 29 },
+  alerts: [
+    { timestamp: '2026-07-01T10:00:01', threat_type: 'anomaly', source_ip: '192.168.1.1', destination_ip: '192.168.1.2', confidence: 0.65, details: { type: 'anomaly' } },
+    { timestamp: '2026-07-01T10:00:02', threat_type: 'signature', source_ip: '10.0.0.1', destination_ip: '192.168.1.2', confidence: 1.0, details: { type: 'signature', rule: 'syn_flood' } },
+    { timestamp: '2026-07-01T10:00:02', threat_type: 'signature', source_ip: '10.0.0.1', destination_ip: '192.168.1.2', confidence: 1.0, details: { type: 'signature', rule: 'port_scan' } },
+    { timestamp: '2026-07-01T10:00:02', threat_type: 'anomaly', source_ip: '10.0.0.1', destination_ip: '192.168.1.2', confidence: 0.78, details: { type: 'anomaly' } },
+    { timestamp: '2026-07-01T10:00:03', threat_type: 'signature', source_ip: '192.168.1.100', destination_ip: '192.168.1.2', confidence: 1.0, details: { type: 'signature', rule: 'syn_flood' } },
+    { timestamp: '2026-07-01T10:00:03', threat_type: 'signature', source_ip: '192.168.1.100', destination_ip: '192.168.1.2', confidence: 1.0, details: { type: 'signature', rule: 'port_scan' } },
+    { timestamp: '2026-07-01T10:00:03', threat_type: 'anomaly', source_ip: '192.168.1.100', destination_ip: '192.168.1.2', confidence: 0.71, details: { type: 'anomaly' } },
+    { timestamp: '2026-07-01T10:00:04', threat_type: 'anomaly', source_ip: '192.168.1.1', destination_ip: '192.168.1.2', confidence: 0.65, details: { type: 'anomaly' } },
+    { timestamp: '2026-07-01T10:00:05', threat_type: 'signature', source_ip: '10.0.0.1', destination_ip: '192.168.1.2', confidence: 1.0, details: { type: 'signature', rule: 'syn_flood' } },
+    { timestamp: '2026-07-01T10:00:05', threat_type: 'signature', source_ip: '10.0.0.1', destination_ip: '192.168.1.2', confidence: 1.0, details: { type: 'signature', rule: 'port_scan' } },
+    { timestamp: '2026-07-01T10:00:06', threat_type: 'anomaly', source_ip: '192.168.1.100', destination_ip: '192.168.1.2', confidence: 0.65, details: { type: 'anomaly' } },
+    { timestamp: '2026-07-01T10:00:07', threat_type: 'signature', source_ip: '10.0.0.1', destination_ip: '192.168.1.2', confidence: 1.0, details: { type: 'signature', rule: 'syn_flood' } },
+  ],
+  traffic: Array.from({ length: 30 }, (_, i) => ({
+    t: new Date(Date.now() - (29 - i) * 1000).toISOString(),
+    pps: i < 10 ? Math.random() * 5 : i < 20 ? Math.random() * 20 + 80 : Math.random() * 5 + 2
+  }))
+};
+
+let isLive = false;
+let isCapturing = false;
+let pollInterval = null;
+let chart = null;
+
+// ── Color helpers ───────────────────────────────────────
+const COLORS = {
+  syn_flood: { bg: 'badge-red', label: 'SYN Flood' },
+  port_scan: { bg: 'badge-red', label: 'Port Scan' },
+  anomaly: { bg: 'badge-yellow', label: 'Anomaly' },
+  signature: { bg: 'badge-red', label: 'Signature' },
+};
+
+// ── API helpers ─────────────────────────────────────────
+async function api(path, opts = {}) {
+  const url = BACKEND_URL ? BACKEND_URL + path : path;
+  try {
+    const resp = await fetch(url, {
+      headers: { 'Content-Type': 'application/json' },
+      ...opts
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    return await resp.json();
+  } catch {
+    return null;
+  }
+}
+
+async function checkBackend() {
+  const result = await api('/api/status');
+  if (result && result.mode === 'live') {
+    isLive = true;
+    document.getElementById('mode-badge').textContent = 'Live';
+    document.getElementById('mode-badge').className = 'badge badge-green text-xs';
+    document.getElementById('demo-banner').classList.add('hidden');
+    return true;
+  }
+  isLive = false;
+  document.getElementById('mode-badge').textContent = 'Demo';
+  document.getElementById('mode-badge').className = 'badge badge-blue text-xs';
+  document.getElementById('demo-banner').classList.remove('hidden');
+  return false;
+}
+
+// ── UI Updates ──────────────────────────────────────────
+function updateStats(stats) {
+  document.getElementById('stat-total').textContent = stats.total ?? 0;
+  document.getElementById('stat-normal').textContent = stats.normal ?? 0;
+  document.getElementById('stat-attacks').textContent = stats.attacks ?? 0;
+  document.getElementById('stat-anomalies').textContent = stats.anomalies ?? 0;
+}
+
+function updateStatus(running) {
+  isCapturing = running;
+  const dot = document.getElementById('status-dot');
+  const text = document.getElementById('status-text');
+  if (running) {
+    dot.className = 'w-2.5 h-2.5 rounded-full bg-red-500 inline-block pulse';
+    text.textContent = 'Capturing';
+    text.className = 'font-medium text-red-400';
+    document.getElementById('btn-start').disabled = true;
+    document.getElementById('btn-stop').disabled = false;
+  } else {
+    dot.className = 'w-2.5 h-2.5 rounded-full bg-gray-500 inline-block';
+    text.textContent = 'Stopped';
+    text.className = 'font-medium text-gray-400';
+    document.getElementById('btn-start').disabled = false;
+    document.getElementById('btn-stop').disabled = true;
+  }
+}
+
+function renderAlert(alert) {
+  const time = alert.timestamp ? alert.timestamp.slice(11, 19) : '--';
+  const type = alert.threat_type || 'unknown';
+  const rule = alert.details?.rule || type;
+  const src = alert.source_ip || '?';
+  const dst = alert.destination_ip || '?';
+  const conf = alert.confidence ?? 0;
+
+  const color = type === 'signature' ? 'badge-red' : 'badge-yellow';
+  const label = type === 'signature' ? (alert.details?.rule || 'Signature') : 'Anomaly';
+
+  return `
+    <tr class="alert-row">
+      <td class="py-2 pr-2 text-gray-400 whitespace-nowrap font-mono text-xs">${time}</td>
+      <td class="py-2 pr-2"><span class="badge ${color}">${label}</span></td>
+      <td class="py-2 pr-2 font-mono text-xs text-gray-300">${src} → ${dst}</td>
+      <td class="py-2 text-right font-mono text-xs ${conf > 0.8 ? 'text-red-400' : 'text-gray-400'}">${conf.toFixed(2)}</td>
+    </tr>
+  `;
+}
+
+function renderAlertTable(alerts) {
+  const tbody = document.getElementById('alert-table-body');
+  const count = document.getElementById('alert-count');
+  if (!alerts || alerts.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="4" class="py-8 text-center text-gray-500 text-sm">No alerts yet</td></tr>';
+    count.textContent = '0 alerts';
+    return;
+  }
+  tbody.innerHTML = alerts.slice().reverse().map(renderAlert).join('');
+  count.textContent = `${alerts.length} alerts`;
+}
+
+// ── Chart ───────────────────────────────────────────────
+function initChart() {
+  const ctx = document.getElementById('rate-chart').getContext('2d');
+  chart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: [],
+      datasets: [{
+        label: 'Packets/sec',
+        data: [],
+        borderColor: '#34d399',
+        backgroundColor: 'rgba(52, 211, 153, 0.08)',
+        fill: true,
+        tension: 0.3,
+        pointRadius: 0,
+        borderWidth: 2,
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: {
+          ticks: { color: '#6b7280', maxTicksLimit: 8, font: { size: 10 } },
+          grid: { color: 'rgba(107,114,128,0.1)' }
+        },
+        y: {
+          beginAtZero: true,
+          ticks: { color: '#6b7280', font: { size: 10 } },
+          grid: { color: 'rgba(107,114,128,0.1)' }
+        }
+      },
+      animation: { duration: 200 }
+    }
+  });
+}
+
+function updateChart(traffic) {
+  if (!chart || !traffic) return;
+  const labels = traffic.map(d => {
+    const t = new Date(d.t);
+    return t.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  });
+  const data = traffic.map(d => d.pps);
+  chart.data.labels = labels;
+  chart.data.datasets[0].data = data;
+  chart.update('none');
+}
+
+// ── Actions ─────────────────────────────────────────────
+async function startCapture() {
+  if (!isLive) return;
+  const iface = document.getElementById('interface-select').value;
+  const result = await api('/api/start', { method: 'POST', body: JSON.stringify({ interface: iface }) });
+  if (result?.success) {
+    updateStatus(true);
+  }
+}
+
+async function stopCapture() {
+  if (!isLive) return;
+  const result = await api('/api/stop', { method: 'POST' });
+  if (result?.success) {
+    updateStatus(false);
+  }
+}
+
+async function runTest() {
+  // Clear first
+  await api('/api/clear', { method: 'POST' });
+  if (isLive) {
+    await api('/api/test', { method: 'POST' });
+    await refreshAll();
+  } else {
+    // Demo mode: show demo data with a slight delay for UX
+    document.getElementById('btn-test').disabled = true;
+    document.getElementById('btn-test').textContent = '⏳ Running...';
+    setTimeout(() => {
+      loadDemoData();
+      document.getElementById('btn-test').disabled = false;
+      document.getElementById('btn-test').textContent = '🧪 Run Test';
+    }, 800);
+  }
+}
+
+async function clearAlerts() {
+  await api('/api/clear', { method: 'POST' });
+  if (isLive) {
+    updateStats({ total: 0, normal: 0, attacks: 0, anomalies: 0 });
+    renderAlertTable([]);
+  } else {
+    updateStats({ total: 0, normal: 0, attacks: 0, anomalies: 0 });
+    renderAlertTable([]);
+    if (chart) {
+      chart.data.labels = [];
+      chart.data.datasets[0].data = [];
+      chart.update('none');
+    }
+  }
+}
+
+// ── Refresh ─────────────────────────────────────────────
+async function refreshAll() {
+  if (isLive) {
+    const [stats, alerts, traffic] = await Promise.all([
+      api('/api/stats'),
+      api('/api/alerts?limit=100'),
+      api('/api/traffic'),
+    ]);
+    if (stats) updateStats(stats);
+    if (alerts) renderAlertTable(alerts);
+    if (traffic) updateChart(traffic);
+
+    const status = await api('/api/status');
+    if (status) updateStatus(status.running);
+  }
+}
+
+// ── Demo data ───────────────────────────────────────────
+function loadDemoData() {
+  updateStats(DEMO_DATA.stats);
+  renderAlertTable(DEMO_DATA.alerts);
+  updateChart(DEMO_DATA.traffic);
+}
+
+// ── Init ────────────────────────────────────────────────
+async function init() {
+  initChart();
+
+  const online = await checkBackend();
+  if (online) {
+    loadDemoData(); // load placeholder while polling
+    pollInterval = setInterval(refreshAll, 2000);
+    refreshAll();
+  } else {
+    loadDemoData();
+  }
+}
+
+init();
+</script>
+</body>
+</html>
